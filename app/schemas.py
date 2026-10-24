@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from app.models import PaymentStatus
 from app.money import to_kopecks, to_rubles
@@ -13,6 +13,8 @@ class PaymentCreate(BaseModel):
     amount: str = Field(examples=["1500.50"])
     currency: Literal["RUB"] = "RUB"
     description: str = Field(default="", max_length=255)
+    # Адрес магазина для уведомлений о смене статуса — необязательный.
+    callback_url: HttpUrl | None = None
 
     @field_validator("amount")
     @classmethod
@@ -53,6 +55,7 @@ class PaymentOut(BaseModel):
     currency: str
     description: str
     status: PaymentStatus
+    callback_url: str | None = None
     created_at: datetime
     refunds: list[RefundOut] = []
 

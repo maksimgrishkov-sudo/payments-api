@@ -11,12 +11,44 @@ services:
       interval: 2s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 20
+
   api:
     build: .
-    environment:
+    environment: &env
       DATABASE_URL: postgresql+asyncpg://payments:payments@db:5432/payments
+      REDIS_URL: redis://redis:6379/0
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-change-me}
+      CALLBACK_SECRET: ${CALLBACK_SECRET:-change-me-too}
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}
+      redis: {condition: service_healthy}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  # Отправка уведомлений магазину: воркер Celery и планировщик sweep() раз в минуту.
+  worker:
+    build: .
+    environment: *env
+    depends_on: [api]
+    command: celery -A app.tasks worker --loglevel=info --concurrency=2
+
+  beat:
+    build: .
+    environment: *env
+    depends_on: [api]
+    command: celery -A app.tasks beat --loglevel=info --schedule /tmp/celerybeat-schedule
+
+  # Игрушечный магазин для ручной проверки: печатает уведомления. docker compose --profile demo up
+  shop:
+    profiles: [demo]
+    image: python:3.13-alpine
+    command: >
+      python -c "import http.server as h;
+      H=type('H',(h.BaseHTTPRequestHandler,),{'do_POST':lambda s:(print('SHOP GOT',s.headers['X-Notification-Id'],s.rfile.read(int(s.headers['Content-Length'])).decode(),flush=True),s.send_response(200),s.end_headers())});
+      h.HTTPServer(('',8080),H).serve_forever()"

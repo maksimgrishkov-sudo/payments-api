@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from sqlalchemy.pool import NullPool  # noqa: E402
 
 import app.db  # noqa: E402
+import app.tasks  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -50,13 +51,22 @@ def database():
 # NullPool: каждый тест в своём event loop, держать соединения между ними нельзя.
 engine = create_async_engine(TEST_URL, poolclass=NullPool)
 app.db.SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+app.tasks.SessionLocal = app.db.SessionLocal
 
 
 @pytest.fixture(autouse=True)
 async def clean():
     async with engine.begin() as con:
-        await con.execute(text("TRUNCATE webhook_events, refunds, payments CASCADE"))
+        await con.execute(text("TRUNCATE notifications, webhook_events, refunds, payments CASCADE"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def queued(monkeypatch):
+    """Очередь Celery без Redis: запоминаем, что API поставило в очередь. Сами задачи тесты зовут напрямую."""
+    ids: list[str] = []
+    monkeypatch.setattr(app.tasks.deliver, "delay", lambda nid: ids.append(nid))
+    return ids
 
 
 @pytest.fixture

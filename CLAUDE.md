@@ -1,6 +1,6 @@
 # payments-api — правила для ИИ-ассистента
 
-Сервис приёма платежей: FastAPI, async SQLAlchemy 2.0, PostgreSQL, Alembic.
+Сервис приёма платежей: FastAPI, async SQLAlchemy 2.0, PostgreSQL, Alembic, Celery + Redis (уведомления магазину).
 
 ## Деньги
 - Только целые копейки (`int`) в базе и в расчётах. `float` для денег запрещён.
@@ -26,3 +26,8 @@ pytest -q
 ruff check . && ruff format --check app tests
 ```
 Новое поведение — новый тест сценария в `tests/test_api.py`. Гонки проверять параллельными запросами (`asyncio.gather`), как в существующих тестах.
+
+## Уведомления (app/tasks.py)
+- Строка в `notifications` пишется в той же транзакции, что и смена платежа; `tasks.enqueue()` — только после commit.
+- Отправка — «хотя бы один раз»: не обещать «ровно один», магазин отсеивает повтор по `X-Notification-Id`.
+- В тестах очередь подменена фикстурой `queued`; задачи зовутся напрямую (`deliver_once`), HTTP — `httpx.MockTransport`.

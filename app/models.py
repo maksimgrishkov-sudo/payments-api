@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Index, Integer, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,6 +32,8 @@ class Payment(Base):
         Enum(PaymentStatus, name="payment_status"), default=PaymentStatus.pending
     )
     refunded_amount: Mapped[int] = mapped_column(Integer, default=0)
+    # Куда сообщать магазину о смене статуса; нет адреса — уведомлений нет.
+    callback_url: Mapped[str | None] = mapped_column(String(500), default=None)
     idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
     request_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -53,6 +55,38 @@ class Refund(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     payment: Mapped[Payment] = relationship(back_populates="refunds")
+
+
+class NotificationStatus(enum.StrEnum):
+    pending = "pending"  # ждёт отправки или повтора
+    sent = "sent"  # магазин ответил 2xx
+    failed = "failed"  # попытки кончились — нужен человек
+
+
+class Notification(Base):
+    """Исходящее уведомление магазину (transactional outbox).
+
+    Строка пишется в той же транзакции, что и смена статуса платежа: статус не может поменяться
+    «без уведомления», даже если Redis в этот момент лежит. Отправляет воркер Celery, с повторами."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_pending", "next_attempt_at", postgresql_where=text("status = 'pending'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    payment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payments.id"), index=True)
+    event: Mapped[str] = mapped_column(String(32))
+    url: Mapped[str] = mapped_column(String(500))
+    payload: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[NotificationStatus] = mapped_column(
+        Enum(NotificationStatus, name="notification_status"), default=NotificationStatus.pending
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(300), default=None)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class WebhookEvent(Base):

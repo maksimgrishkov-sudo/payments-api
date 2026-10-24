@@ -7,10 +7,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app import tasks
 from app.config import settings
 from app.db import get_session
-from app.models import Payment, PaymentStatus, Refund, WebhookEvent
-from app.money import to_kopecks
+from app.models import Notification, Payment, PaymentStatus, Refund, WebhookEvent
+from app.money import to_kopecks, to_rubles
 from app.schemas import PaymentCreate, PaymentOut, RefundCreate, WebhookIn
 from app.security import request_hash, signature_ok
 from app.state import EVENT_STATUS, can_move
@@ -43,7 +44,8 @@ async def create_payment(
 ) -> Payment:
     """Повтор с тем же ключом и тем же телом вернёт тот же платёж, а не создаст второй.
     Тот же ключ с другим телом — 409: клиент перепутал ключи, молча списывать нельзя."""
-    h = request_hash(body.amount, body.currency, body.description)
+    callback = str(body.callback_url) if body.callback_url else None
+    h = request_hash(body.amount, body.currency, body.description, callback or "")
     existing = (
         await session.execute(
             select(Payment).where(Payment.idempotency_key == idempotency_key).options(selectinload(Payment.refunds))
@@ -56,6 +58,7 @@ async def create_payment(
         amount=to_kopecks(body.amount),
         currency=body.currency,
         description=body.description,
+        callback_url=callback,
         idempotency_key=idempotency_key,
         request_hash=h,
         status=PaymentStatus.pending,
@@ -73,6 +76,27 @@ async def create_payment(
         ).scalar_one()
         return _same_or_conflict(existing, h)
     return await load_payment(session, payment.id)
+
+
+def notify(session: AsyncSession, payment: Payment, event: str) -> uuid.UUID | None:
+    """Пишет уведомление в outbox — в ТОЙ ЖЕ транзакции, что и смена платежа. Отправка — после commit."""
+    if not payment.callback_url:
+        return None
+    n = Notification(
+        id=uuid.uuid4(),
+        payment_id=payment.id,
+        event=event,
+        url=payment.callback_url,
+        payload={
+            "event": event,
+            "payment_id": str(payment.id),
+            "status": payment.status.value,
+            "amount": to_rubles(payment.amount),
+            "refunded_amount": to_rubles(payment.refunded_amount),
+        },
+    )
+    session.add(n)
+    return n.id
 
 
 def _same_or_conflict(existing: Payment, h: str) -> Payment:
@@ -109,6 +133,9 @@ async def refund(
             payment.refunded_amount += amount
             if payment.refunded_amount == payment.amount:
                 payment.status = PaymentStatus.refunded
+            notification = notify(session, payment, "refund.succeeded")
+    if done is None:
+        tasks.enqueue([notification] if notification else [])
     return await load_payment(session, payment_id)
 
 
@@ -148,4 +175,6 @@ async def bank_webhook(
             # Пришло не по порядку или противоречит текущему статусу — фиксируем, но не применяем.
             return {"result": "ignored", "reason": f"{payment.status.value} → {new_status.value} нельзя"}
         payment.status = new_status
+        notification = notify(session, payment, event.type)
+    tasks.enqueue([notification] if notification else [])
     return {"result": "applied", "status": new_status.value}
